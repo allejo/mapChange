@@ -45,7 +45,7 @@ public:
       return true;
 
     if (player->hasPerm("mapchange")) {
-      if (!matchInProgress || player->hasPerm(bz_perm_shutdownServer)) {
+      if (!matchInProgress) {
         if (command == "maprandom") {
           std::ifstream confStream(confFile.c_str());
           std::string line;
