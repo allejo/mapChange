@@ -1,131 +1,16 @@
 // mapchange.cpp : Defines the entry point for the DLL application.
 //
 
-#include "bzfsAPI.h"
-#include "plugin_utils.h"
 #include <math.h>
 #include <time.h>
 #include <fstream>
-#include <string>
 #include <list>
 
-std::string confFile;
-std::string outputFile;
-bool matchInProgress = false;
+#include "bzfsAPI.h"
+#include "plugin_files.h"
+#include "plugin_utils.h"
 
-class MapChangerCommands : public bz_CustomSlashCommandHandler
-{
-public:
-    
-  virtual bool SlashCommand ( int playerID, bz_ApiString command, bz_ApiString /*message*/, bz_APIStringList* params )
-  {
-    if (command == "maplist") {
-      std::ifstream confStream(confFile.c_str());
-      if (!confStream.fail()) {
-        std::string line;
-
-        bz_sendTextMessage(BZ_SERVER,playerID,"Available configurations: ");
-
-        bz_APIStringList* lineList = bz_newStringList();
-        while (std::getline(confStream, line))
-        {
-          lineList->clear();
-          lineList->tokenize(line.c_str(), " \t", 2, true);
-
-          if (lineList->size() == 2)
-            bz_sendTextMessage(BZ_SERVER,playerID,(std::string(" -  ") + lineList->get(0).c_str()).c_str());
-        }
-        bz_deleteStringList(lineList);
-      }
-      return true;
-    }
-
-    bz_BasePlayerRecord *player = bz_getPlayerByIndex(playerID);
-    if (!player)
-      return true;
-
-    if (player->hasPerm("mapchange")) {
-      if (!matchInProgress) {
-        if (command == "maprandom") {
-          std::ifstream confStream(confFile.c_str());
-          std::string line;
-
-          std::vector<std::string> mapnames;
-          std::vector<std::string> mapfiles;
-          bz_APIStringList* lineList = bz_newStringList();
-          while (std::getline(confStream, line))
-          {
-            lineList->clear();
-            lineList->tokenize(line.c_str(), " \t", 2, true);
-
-            if (lineList->size() == 2) {
-              mapnames.push_back(lineList->get(0).c_str());
-              mapfiles.push_back(lineList->get(1).c_str());
-            }
-          }
-
-          int i = rand() % mapnames.size();
-          std::ofstream oputfStream(outputFile.c_str());
-          oputfStream << mapfiles[i] << std::endl;
-          oputfStream.close();
-          bz_sendTextMessage(BZ_SERVER,BZ_ALLUSERS,(std::string("Server restarting with randomly selected configuration (") + mapnames[i] + "): Requested by " + player->callsign.c_str()).c_str());
-          bz_shutdown();
-
-          bz_deleteStringList(lineList);
-          bz_freePlayerRecord(player);
-
-          return true;
-        }
-        if (params->size() != 1) {
-          bz_sendTextMessage(BZ_SERVER,playerID,"Usage: /mapchange <confname>");
-          bz_freePlayerRecord(player);
-
-          return true;
-        }
-
-        bool done = false;
-        std::ifstream confStream(confFile.c_str());
-        if (!confStream.fail()) {
-          std::string line;
-
-          bz_APIStringList* lineList = bz_newStringList();
-          while (std::getline(confStream, line))
-          {
-            lineList->clear();
-            lineList->tokenize(line.c_str(), " \t", 2, true);
-	    bz_ApiString thisConfName = lineList->get(0); thisConfName.tolower();
-	    bz_ApiString requestedConfName = params->get(0); requestedConfName.tolower();
-	    if (lineList->size() == 2 && thisConfName == requestedConfName) {
-              std::ofstream oputfStream(outputFile.c_str());
-              oputfStream << lineList->get(1).c_str() << std::endl;
-              oputfStream.close();
-              bz_sendTextMessage(BZ_SERVER,BZ_ALLUSERS,(std::string("Server restarting with configuration ") + lineList->get(0).c_str() + ": Requested by " + player->callsign.c_str()).c_str());
-              bz_shutdown();
-              done = true;
-            }
-          }
-
-          bz_deleteStringList(lineList);
-        }
-        if (!done) bz_sendTextMessage(BZ_SERVER,playerID,"The configuration you selected does not exist");
-      }
-      else {
-        bz_sendTextMessage(BZ_SERVER,playerID,"Sorry, you are not allowed to change configurations when a match is in progress");
-        bz_sendTextMessage(BZ_SERVER,playerID,"For this malicious activity, you will be kicked");
-        bz_kickUser(playerID, "mapchange during match", true);
-      }
-    }
-    else bz_sendTextMessage(BZ_SERVER,playerID,"Sorry, you are not allowed to change configurations on this server");
-
-    bz_freePlayerRecord(player);
-
-    return true;
-  }
-};
-
-MapChangerCommands mapChanger;
-
-class MapChanger : public bz_Plugin 
+class MapChanger : public bz_Plugin, bz_CustomSlashCommandHandler, bz_CustomPollTypeHandler
 {
 public:
   virtual void Event ( bz_EventData *eventData )
@@ -137,33 +22,217 @@ public:
   virtual const char* Name (){return "Map Change";}
   virtual void Init ( const char* config);
   virtual void Cleanup();
+
+  virtual bool SlashCommand (int playerID, bz_ApiString command, bz_ApiString message, bz_APIStringList* params);
+
+  virtual bool PollOpen (bz_BasePlayerRecord *player, const char* action, const char* parameters);
+  virtual void PollClose (const char* action, const char* parameters, bool success);
+
+private:
+  bz_ApiString getConfFromName(const char* mapname);
+  void changeMap(const char* mapname, int requestorID);
+  void randomMap(int requestorID);
+
+  void writeOutFile(std::string mapname);
+
+  int pollRequestor = -1;
+  bool matchInProgress = false;
+  std::string confFile;
+  std::string outputFile;
 };
 
-BZ_PLUGIN(MapChanger);
+BZ_PLUGIN(MapChanger)
 
 void MapChanger::Init ( const char* commandLine )
 {
-  bz_debugMessage(4,"mapchange plugin loaded");
   PluginConfig config(commandLine);
-  if(! config.errors) {
+
+  if (!config.errors) {
     confFile = config.item("mapchange", "ConfigurationFile");
     outputFile = config.item("mapchange", "OutputFile");
   }
+  else {
+    bz_debugMessage(0, "ERROR :: Map Change :: There was an error loading your configuration file.");
+  }
+
   Register(bz_eGameEndEvent);
   Register(bz_eGameStartEvent);
-  bz_registerCustomSlashCommand ( "mapchange", &mapChanger );
-  bz_registerCustomSlashCommand ( "maplist", &mapChanger );
-  bz_registerCustomSlashCommand ( "maprandom", &mapChanger );
+
+  bz_registerCustomSlashCommand("mapchange", this);
+  bz_registerCustomSlashCommand("maplist", this);
+  bz_registerCustomSlashCommand("maprandom", this);
+
+  bz_registerCustomPollType("mapchange", "mapname", this);
+
   srand(time(NULL));
 }
 
 void MapChanger::Cleanup ( void )
 {
   Flush();
-  bz_removeCustomSlashCommand ( "maprandom" );
-  bz_removeCustomSlashCommand ( "maplist" );
-  bz_removeCustomSlashCommand ( "mapchange" );
-  bz_debugMessage(4,"mapchange plugin unloaded");
+
+  bz_removeCustomSlashCommand("maprandom");
+  bz_removeCustomSlashCommand("maplist");
+  bz_removeCustomSlashCommand("mapchange");
+
+  bz_removeCustomPollType("mapchange");
+}
+
+bool MapChanger::SlashCommand(int playerID, bz_ApiString command, bz_ApiString message, bz_APIStringList* params)
+{
+  if (command == "maplist") {
+    std::vector<std::string> lines = getFileTextLines(confFile);
+
+    if (lines.empty()) {
+      bz_sendTextMessage(BZ_SERVER, playerID, "No map configurations found.");
+      return true;
+    }
+
+    bz_sendTextMessage(BZ_SERVER, playerID, "Available configurations: ");
+    bz_APIStringList list;
+
+    for (auto line : lines) {
+      list.clear();
+      list.tokenize(line.c_str(), " \t", 2, true);
+
+      if (list.size() == 2) {
+	bz_sendTextMessagef(BZ_SERVER, playerID, " - %s", list.get(0).c_str());
+      }
+    }
+
+    return true;
+  }
+
+  bz_BasePlayerRecord *pr = bz_getPlayerByIndex(playerID);
+  bool isOperator = pr->op;
+  bz_freePlayerRecord(pr);
+
+  if (!bz_hasPerm(playerID, "mapchange") || !isOperator) {
+    bz_sendTextMessagef(BZ_SERVER, playerID, "You do not have permission to run the /%s command", command.c_str());
+
+    return true;
+  }
+
+  if (matchInProgress) {
+    bz_sendTextMessage(BZ_SERVER, playerID, "Sorry, you are not allowed to change configurations when a match is in progress");
+
+    return true;
+  }
+
+  if (command == "maprandom") {
+    randomMap(playerID);
+    return true;
+  }
+
+  if (command == "mapchange") {
+    if (params->size() != 1) {
+      bz_sendTextMessage(BZ_SERVER, playerID, "Usage: /mapchange <confname>");
+
+      return true;
+    }
+
+    changeMap(params->get(0).c_str(), playerID);
+
+    return true;
+  }
+
+  return false;
+}
+
+bool MapChanger::PollOpen(bz_BasePlayerRecord *player, const char* action, const char* parameters)
+{
+  int playerID = player->playerID;
+  std::string _action = action;
+
+  if (!player->hasPerm("pollMapchange") || !player->hasPerm("mapchange")) {
+    bz_sendTextMessage(BZ_SERVER, playerID, "You do not have permissions to initiate a mapchange poll.");
+    return false;
+  }
+
+  if (getConfFromName(parameters).empty()) {
+    bz_sendTextMessagef(BZ_SERVER, playerID, "The %s map configuration does not exist.", parameters);
+    return false;
+  }
+
+  pollRequestor = playerID;
+
+  return true;
+}
+
+void MapChanger::PollClose(const char* action, const char* parameters, bool success)
+{
+  std::string _action = action;
+  std::string _parameters = action;
+
+  if (_action == "mute" && success) {
+    changeMap(parameters, pollRequestor);
+  }
+}
+
+void MapChanger::randomMap(int requestorID)
+{
+  std::vector<std::string> lines = getFileTextLines(confFile);
+  std::vector<std::string> mapnames, mapfiles;
+
+  bz_APIStringList list;
+  for (auto line : lines) {
+    list.clear();
+    list.tokenize(line.c_str(), " \t", 2, true);
+
+    if (list.size() == 2) {
+      mapnames.push_back(list.get(0).c_str());
+      mapfiles.push_back(list.get(1).c_str());
+    }
+  }
+
+  int i = rand() % mapnames.size();
+  writeOutFile(mapfiles[i]);
+  bz_sendTextMessagef(BZ_SERVER, BZ_ALLUSERS, "Server restarting with randomly selected configuration (%s): Requested by %s", mapfiles[i].c_str(), bz_getPlayerCallsign(requestorID));
+  bz_shutdown();
+}
+
+bz_ApiString MapChanger::getConfFromName(const char *mapname)
+{
+  std::vector<std::string> lines = getFileTextLines(confFile);
+  bz_ApiString requestedConf = mapname;
+  requestedConf.tolower();
+
+  bz_APIStringList list;
+  for (auto line : lines) {
+    list.clear();
+    list.tokenize(line.c_str(), " \t", 2, true);
+
+    bz_ApiString thisConf = list.get(0);
+    thisConf.tolower();
+
+    if (list.size() == 2 && thisConf == requestedConf) {
+      return list.get(1);
+    }
+  }
+
+  return "";
+}
+
+void MapChanger::changeMap(const char *mapname, int requestorID)
+{
+  bz_ApiString targetConfName = getConfFromName(mapname);
+
+  if (targetConfName.empty())
+  {
+    bz_sendTextMessagef(BZ_SERVER, requestorID, "The %s configuration you requested does not exist.", mapname);
+    return;
+  }
+
+  writeOutFile(targetConfName);
+  bz_sendTextMessagef(BZ_SERVER, BZ_ALLUSERS, "Server restarting with configuration %s: Requested by %s", targetConfName.c_str(), bz_getPlayerCallsign(requestorID));
+  bz_shutdown();
+}
+
+void MapChanger::writeOutFile(std::string mapname)
+{
+  std::ofstream oputfStream(outputFile.c_str());
+  oputfStream << mapname << std::endl;
+  oputfStream.close();
 }
 
 // Local Variables: ***
@@ -173,4 +242,3 @@ void MapChanger::Cleanup ( void )
 // indent-tabs-mode: t ***
 // End: ***
 // ex: shiftwidth=2 tabstop=8
-
