@@ -139,7 +139,7 @@ public:
   virtual void Cleanup();
 };
 
-BZ_PLUGIN(MapChanger);
+BZ_PLUGIN(MapChanger)
 
 void MapChanger::Init ( const char* commandLine )
 {
